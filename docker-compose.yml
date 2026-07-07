@@ -1,0 +1,262 @@
+version: "3.9"
+
+name: nectar-iot-platform
+
+networks:
+  nectar-network:
+    external: true
+
+volumes:
+  kafka_data:
+  postgres_data:
+  neo4j_data:
+  airflow_logs:
+  airflow_dags:
+  spark_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+  # ---------- Zookeeper ----------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    hostname: zookeeper
+    networks:
+      - nectar-network
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  # ---------- Kafka ----------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    hostname: kafka
+    networks:
+      - nectar-network
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_BYTES: 5368709120
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+
+  # ---------- AKHQ (Kafka UI) ----------
+  akhq:
+    image: tchiotludo/akhq:latest
+    container_name: akhq
+    networks:
+      - nectar-network
+    ports:
+      - "8080:8080"
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            local:
+              properties:
+                bootstrap.servers: kafka:9092
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  # ---------- PostgreSQL ----------
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    hostname: postgres
+    networks:
+      - nectar-network
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: nectar
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # ---------- Neo4j ----------
+  neo4j:
+    image: neo4j:5-community
+    container_name: neo4j
+    hostname: neo4j
+    networks:
+      - nectar-network
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/neo4j123
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+  # ---------- Spark Master ----------
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    hostname: spark-master
+    networks:
+      - nectar-network
+    ports:
+      - "7077:7077"
+      - "8082:8080"
+    environment:
+      SPARK_MASTER_HOST: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    volumes:
+      - ./spark:/opt/spark/data
+    restart: unless-stopped
+
+  # ---------- Spark Worker ----------
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    hostname: spark-worker
+    networks:
+      - nectar-network
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker"]
+    volumes:
+      - ./spark:/opt/spark/data
+    restart: unless-stopped
+
+  # ---------- Airflow ----------
+  airflow-init:
+    image: apache/airflow:2.8.0
+    container_name: airflow-init
+    networks:
+      - nectar-network
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    command: |
+      bash -c "
+        airflow db init &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+      "
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    restart: on-failure
+
+  airflow-webserver:
+    image: apache/airflow:2.8.0
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    networks:
+      - nectar-network
+    ports:
+      - "8081:8080"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - airflow-init
+    command: webserver
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.0
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    networks:
+      - nectar-network
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - airflow-init
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    restart: unless-stopped
+
+  # ---------- FastAPI ----------
+  fastapi:
+    build:
+      context: ./fastapi
+      dockerfile: Dockerfile
+    container_name: fastapi
+    hostname: fastapi
+    networks:
+      - nectar-network
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # ---------- Streamlit ----------
+  streamlit:
+    build:
+      context: ./streamlit
+      dockerfile: Dockerfile
+    container_name: streamlit
+    hostname: streamlit
+    networks:
+      - nectar-network
+    ports:
+      - "8501:8501"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # ---------- Prometheus ----------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    hostname: prometheus
+    networks:
+      - nectar-network
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+
+  # ---------- Grafana ----------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    hostname: grafana
+    networks:
+      - nectar-network
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped

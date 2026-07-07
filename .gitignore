@@ -1,0 +1,24 @@
+# Docker volumes and data
+spark/delta/
+spark/checkpoints/
+postgres_data/
+kafka_data/
+neo4j_data/
+airflow_logs/
+prometheus_data/
+grafana_data/
+
+# Logs
+simulator.log
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
